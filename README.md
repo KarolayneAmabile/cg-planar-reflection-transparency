@@ -1,6 +1,8 @@
 # Planar Reflection and Transparency via Multi-Pass Rendering in WebGL 2
 Esse projeto visa simular reflexo e transparência em tempo real num plano de vidro escuro, com renderização em múltiplos passos (render-to-texture), plano de clipping e Fresnel, em WebGL 2 e GLSL.
 
+![Cena com a maçã na frente do vidro, a melancia vista através dele e o reflexo da maçã no vidro](screenshot.png)
+
 ## Objetivo
 O objetivo é criar, com shaders próprios, um material translúcido que também reflete, como um vidro escuro. Ele é aplicado a um plano que divide uma cena 3D. Na cena, uma maçã e uma melancia giram, uma de cada lado do vidro, sobre um chão de piso. As especificações completas estão no [enunciado do trabalho](enunciado-cg-trabalho-reflexo-e-transparencia.pdf). Em resumo:
 
@@ -15,7 +17,7 @@ O objetivo é criar, com shaders próprios, um material translúcido que também
 As texturas e os modelos precisam ser servidos por HTTP. Aberta direto pelo arquivo (`file://`), a página é bloqueada pelo navegador e passa a usar substitutos gerados.
 
 ```bash
-git clone <url-do-repositorio> cg-planar-reflection-transparency
+git clone https://github.com/KarolayneAmabile/cg-planar-reflection-transparency
 cd cg-planar-reflection-transparency
 python3 -m http.server 8000
 ```
@@ -71,6 +73,7 @@ assets/
   metal/            textura do vidro
   floor/            textura do chão
 enunciado-cg-trabalho-reflexo-e-transparencia.pdf   especificação do trabalho
+screenshot.png      captura de tela da cena
 ```
 
 ## Créditos
