@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Planar Reflection and Transparency via Multi-Pass Rendering - CG</title>
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    #panel {
+        position: absolute; top: 10px; left: 10px; width: 290px;
+        background: rgba(0, 0, 0, 0.65); color: #eee; padding: 10px 12px;
+        border-radius: 6px; font-size: 13px; user-select: none;
+    }
+    #panel h3 { margin: 0 0 6px 0; font-size: 15px; }
+    #panel label { display: block; margin-top: 6px; }
+    #panel input[type=range] { width: 100%; }
+    #panel .val { float: right; color: #9cf; }
+    #panel small { color: #bbb; line-height: 1.5; display: block; margin-top: 8px; }
+    #warning { color: #fc6; display: none; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<!-- =====================================================================
+     SHADER 1 (scene objects): Phong lighting (ambient + diffuse +
+     specular, no shadows) + texture + CLIPPING PLANE.
+     Used in all three passes: reflection, transparency and real camera.
+     ===================================================================== -->
+<script type="vertex" id="vsScene">
+    #version 300 es
+    layout(location = 0) in vec4 position;
+    layout(location = 1) in vec3 normal;
+    layout(location = 2) in vec2 texCoord;
+
+    uniform mat4 mMatrix;      // model (world) matrix
+    uniform mat3 nMatrix;      // normal matrix (inverse transpose of mMatrix)
+    uniform mat4 vpMatrix;     // projection * view (reflection pass: P * V * Reflection)
+    uniform vec2 texScale;     // texture tiling
+
+    out vec3 worldPos;
+    out vec3 worldNormal;
+    out vec2 fTexCoord;
+
+    void main() {
+        vec4 wp = mMatrix * position;
+        worldPos = wp.xyz;
+        worldNormal = nMatrix * normal;
+        fTexCoord = texCoord * texScale;
+        gl_Position = vpMatrix * wp;
+    }
+</script>
+
+<script type="fragment" id="fsScene">
+    #version 300 es
+    precision highp float;
+
+    in vec3 worldPos;
+    in vec3 worldNormal;
+    in vec2 fTexCoord;
+
+    uniform sampler2D textureMap;
+    uniform vec4 clipPlane;        // clipping plane (a,b,c,d) in world coordinates
+    uniform vec3 lightPosition;
+    uniform vec3 lightIntensity;
+    uniform vec3 ambientLight;
+    uniform vec3 camPos;           // camera position (real or reflected)
+    uniform float shininess;
+    uniform float ks;
+
+    out vec4 fragColor;
+
+    void main() {
+        // Clipping plane: everything on the negative side of the plane is discarded.
+        // No object selection: ALL objects are drawn in every pass; the plane
+        // decides (per fragment) what is visible, like glClipPlane.
+        if (dot(clipPlane, vec4(worldPos, 1.0)) < 0.0) discard;
+
+        vec3 N = normalize(worldNormal);
+        vec3 L = normalize(lightPosition - worldPos);
+        vec3 V = normalize(camPos - worldPos);
+        vec3 R = reflect(-L, N);
+
+        float diff = max(dot(N, L), 0.0);
+        float spec = step(0.0, dot(N, L)) * pow(max(dot(R, V), 0.0), shininess);
+
+        vec4 t = texture(textureMap, fTexCoord);
+        vec3 base = mix(vec3(1.0), t.rgb, t.a);   // transparent texels become white
+
+        vec3 color = base * (ambientLight + lightIntensity * diff) + ks * lightIntensity * spec;
+        fragColor = vec4(color, 1.0);
+    }
+</script>
+
+<!-- =====================================================================
+     SHADER 2 (glass): completely different. It does not light "objects":
+     it composes the textures produced by the previous passes (framebuffers)
+     using the view angle (Fresnel/Schlick), the transparency (uniform) and
+     the glass's own default texture.
+     ===================================================================== -->
+<script type="vertex" id="vsGlass">
+    #version 300 es
+    layout(location = 0) in vec4 position;
+    layout(location = 2) in vec2 texCoord;
+
+    uniform mat4 mMatrix;
+    uniform mat4 vpMatrix;
+    uniform vec2 texScale;
+
+    out vec3 worldPos;
+    out vec2 fTexCoord;
+
+    void main() {
+        vec4 wp = mMatrix * position;
+        worldPos = wp.xyz;
+        fTexCoord = texCoord * texScale;
+        gl_Position = vpMatrix * wp;
+    }
+</script>
+
+<script type="fragment" id="fsGlass">
+    #version 300 es
+    precision highp float;
+
+    in vec3 worldPos;
+    in vec2 fTexCoord;
+
+    uniform sampler2D reflectionMap;   // pass 1: reflected scene (mirrored camera + clipping)
+    uniform sampler2D refractionMap;   // pass 2: scene behind the glass (inverted clipping)
+    uniform sampler2D glassMap;        // default glass texture (metal)
+    uniform vec2 resolution;
+
+    uniform vec3 planeNormal;          // glass normal (world)
+    uniform vec3 camPos;
+    uniform vec3 lightPosition;
+    uniform vec3 lightIntensity;
+    uniform vec3 ambientLight;
+
+    uniform float transparency;        // 0 = opaque, 1 = fully transparent
+    uniform float F0;                  // reflectivity at normal incidence
+    uniform vec3 tint;                 // glass color/darkening
+    uniform int viewMode;              // 0 = final, 1 = reflection only, 2 = transparency only
+
+    out vec4 fragColor;
+
+    void main() {
+        // screen coordinate -> coordinate in the framebuffer textures
+        vec2 screenUV = gl_FragCoord.xy / resolution;
+
+        vec3 V = normalize(camPos - worldPos);
+        // the glass is two-sided: the normal always faces the camera
+        vec3 N = faceforward(normalize(planeNormal), -V, normalize(planeNormal));
+
+        // default glass texture
+        vec3 g = texture(glassMap, fTexCoord).rgb;
+
+        // ---- view angle: Schlick's approximation of Fresnel ----
+        float cosTheta = clamp(dot(N, V), 0.0, 1.0);
+        float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+
+        vec3 reflected   = texture(reflectionMap, screenUV).rgb;
+        vec3 transmitted = texture(refractionMap, screenUV).rgb * tint;
+
+        // glass body (lit default texture: ambient + diffuse)
+        vec3 L = normalize(lightPosition - worldPos);
+        float diff = max(dot(N, L), 0.0);
+        vec3 body = g * tint * (ambientLight + lightIntensity * diff);
+
+        // transparency controlled by the uniform
+        vec3 surface = mix(body, transmitted, transparency);
+        // reflection grows at grazing angles (Fresnel); transmission decreases accordingly
+        vec3 color = mix(surface, reflected, fresnel);
+
+        // specular highlight of the light on the glass
+        vec3 R = reflect(-L, N);
+        color += lightIntensity * pow(max(dot(R, V), 0.0), 80.0) * 0.8;
+
+        if (viewMode == 1) color = reflected;
+        if (viewMode == 2) color = texture(refractionMap, screenUV).rgb;
+
+        fragColor = vec4(color, 1.0);
+    }
+</script>
+
+<canvas id="webgl-canvas"></canvas>
+
+<div id="panel">
+    <h3>Reflection and Transparency</h3>
+    <label>Transparency (uniform) <span class="val" id="vTransparency"></span>
+        <input type="range" id="transparency" min="0" max="1" step="0.01" value="0.65"></label>
+    <label>Reflectivity F0 <span class="val" id="vF0"></span>
+        <input type="range" id="f0" min="0" max="1" step="0.01" value="0.12"></label>
+    <label>Glass darkening <span class="val" id="vDarkening"></span>
+        <input type="range" id="darkening" min="0" max="1" step="0.01" value="0.45"></label>
+    <label>Glass angle <span class="val" id="vAngle"></span>
+        <input type="range" id="angle" min="-40" max="40" step="1" value="0"></label>
+    <label>Show on glass
+        <select id="viewMode">
+            <option value="0">Final result</option>
+            <option value="1">Reflection texture only (pass 1)</option>
+            <option value="2">Transparency texture only (pass 2)</option>
+        </select></label>
+    <label><input type="checkbox" id="pause"> Pause rotation</label>
+    <small>
+        <b>Flyby camera:</b> drag the mouse to look around<br>
+        W/S forward/back &nbsp; A/D strafe &nbsp; Q/E down/up<br>
+        Arrow keys also turn the camera &nbsp; Shift = faster<br>
+        H hides this panel
+    </small>
+    <div id="warning">Textures/models could not be loaded (serve the folder over HTTP,
+        e.g. <code>python3 -m http.server</code>). Using generated placeholders.</div>
+</div>
+
+<script type="text/javascript" src="Common/MV.js"></script>
+<script type="text/javascript" src="Common/initShaders.js"></script>
+<script>
+    // ------------------------------------------------------------------
+    // Context
+    // ------------------------------------------------------------------
+    const canvas = document.getElementById("webgl-canvas");
+    const gl = canvas.getContext("webgl2");
+    if (!gl) {
+        document.body.innerHTML = "This project requires WebGL 2, which is not available.";
+        throw new Error("WebGL 2 not available");
+    }
+    gl.enable(gl.DEPTH_TEST);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+    const sceneProgram = initShaders(gl, "vsScene", "fsScene");
+    const glassProgram = initShaders(gl, "vsGlass", "fsGlass");
+
+    function locations(program, names) {
+        const out = {};
+        for (const n of names) out[n] = gl.getUniformLocation(program, n);
+        return out;
+    }
+    const uS = locations(sceneProgram, ["mMatrix", "nMatrix", "vpMatrix", "texScale", "textureMap",
+        "clipPlane", "lightPosition", "lightIntensity", "ambientLight", "camPos", "shininess", "ks"]);
+    const uG = locations(glassProgram, ["mMatrix", "vpMatrix", "reflectionMap", "refractionMap",
+        "glassMap", "texScale", "resolution", "planeNormal", "camPos",
+        "lightPosition", "lightIntensity", "ambientLight", "transparency", "F0", "tint",
+        "viewMode"]);
+
+    const warning = document.getElementById("warning");
+
+    // ------------------------------------------------------------------
+    // Small vector helpers (plain arrays)
+    // ------------------------------------------------------------------
+    const v3 = {
+        add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+        sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+        scale: (a, s) => [a[0] * s, a[1] * s, a[2] * s],
+        dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+        cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+        norm: (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
+    };
+    // applies a mat4 (MV.js, m[row][column]) to (x,y,z,w)
+    function transform(m, p, w) {
+        const r = [0, 0, 0];
+        for (let a = 0; a < 3; a++) r[a] = m[a][0] * p[0] + m[a][1] * p[1] + m[a][2] * p[2] + m[a][3] * w;
+        return r;
+    }
+
+    // ------------------------------------------------------------------
+    // Geometry (position, normal and texture coordinate)
+    // ------------------------------------------------------------------
+    function createMesh(pos, nor, uv) {
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+        const attrib = (loc, data, size) => {
+            const b = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, b);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+            gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(loc);
+        };
+        attrib(0, pos, 3);
+        attrib(1, nor, 3);
+        attrib(2, uv, 2);
+        gl.bindVertexArray(null);
+        return { vao, count: pos.length / 3 };
+    }
+
+    function sphereMesh(slices, stacks) {
+        const pos = [], nor = [], uv = [];
+        const pt = (s, t) => {
+            const th = (s / slices) * 2 * Math.PI, ph = (t / stacks) * Math.PI;
+            const p = [Math.sin(ph) * Math.cos(th), Math.cos(ph), Math.sin(ph) * Math.sin(th)];
+            return { p, uv: [s / slices, 1 - t / stacks] };
+        };
+        for (let t = 0; t < stacks; t++) {
+            for (let s = 0; s < slices; s++) {
+                const a = pt(s, t), b = pt(s + 1, t), c = pt(s + 1, t + 1), d = pt(s, t + 1);
+                for (const q of [a, c, b, a, d, c]) { pos.push(...q.p); nor.push(...q.p); uv.push(...q.uv); }
+            }
+        }
+        return createMesh(pos, nor, uv);
+    }
+
+    // square on the XY plane, from -1 to 1, normal +Z
+    function quadMesh() {
+        const pos = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0];
+        const nor = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1];
+        const uv = [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1];
+        return createMesh(pos, nor, uv);
+    }
+
+    const sphere = sphereMesh(40, 20);
+    const quad = quadMesh();
+
+    // ------------------------------------------------------------------
+    // OBJ parser (v, vt, vn, f). The model is centered at the origin and
+    // scaled so that its largest dimension equals 1 (the final size comes
+    // from the model matrix).
+    // ------------------------------------------------------------------
+    function parseOBJ(text) {
+        const P = [], T = [], N = [];
+        const pos = [], nor = [], uv = [];
+        const index = (s, arr) => {
+            if (!s) return -1;                      // empty field (e.g. "v//vn")
+            const k = parseInt(s);
+            return k < 0 ? arr.length + k : k - 1;  // OBJ is 1-based; negative = relative
+        };
+        for (const raw of text.split("\n")) {
+            const s = raw.trim().split(/\s+/);
+            if (s[0] === "v") P.push([+s[1], +s[2], +s[3]]);
+            else if (s[0] === "vt") T.push([+s[1], +s[2]]);
+            else if (s[0] === "vn") N.push([+s[1], +s[2], +s[3]]);
+            else if (s[0] === "f") {
+                const vs = s.slice(1).map((t) => {
+                    const [a, b, c] = t.split("/");
+                    return [index(a, P), index(b, T), index(c, N)];
+                });
+                // polygons with more than 3 vertices become a triangle fan
+                for (let q = 1; q + 1 < vs.length; q++) {
+                    const tri = [vs[0], vs[q], vs[q + 1]];
+                    const faceN = v3.norm(v3.cross(v3.sub(P[tri[1][0]], P[tri[0][0]]),
+                                                   v3.sub(P[tri[2][0]], P[tri[0][0]])));
+                    for (const v of tri) {
+                        pos.push(...P[v[0]]);
+                        uv.push(...(v[1] >= 0 ? T[v[1]] : [0, 0]));
+                        nor.push(...(v[2] >= 0 ? N[v[2]] : faceN));
+                    }
+                }
+            }
+        }
+        const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        for (let q = 0; q < pos.length; q++) {
+            mn[q % 3] = Math.min(mn[q % 3], pos[q]);
+            mx[q % 3] = Math.max(mx[q % 3], pos[q]);
+        }
+        const c = [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2];
+        const s = 1 / Math.max(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
+        for (let q = 0; q < pos.length; q++) pos[q] = (pos[q] - c[q % 3]) * s;
+        return createMesh(pos, nor, uv);
+    }
+
+    // while the .obj is loading (or if it fails), a sphere is used instead
+    const meshes = { apple: sphere, watermelon: sphere };
+    function loadOBJ(name, url) {
+        fetch(url, { cache: "no-store" })   // always read the current version of the file
+            .then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); })
+            .then((text) => { meshes[name] = parseOBJ(text); })
+            .catch((e) => {
+                console.warn("Could not load " + url + ":", e);
+                warning.style.display = "block";
+            });
+    }
+    loadOBJ("apple", "assets/apple/3DApple001_LQ-1K-JPG.obj");
+    loadOBJ("watermelon", "assets/watermelon/3DMelon001_LQ-1K-JPG.obj");
+
+    // ------------------------------------------------------------------
+    // Textures
+    // ------------------------------------------------------------------
+    function fallbackPixels(seed) {
+        // generated checkerboard, in case the browser blocks the images (file://)
+        const n = 64, data = new Uint8Array(n * n * 4);
+        const c1 = [[200, 200, 200], [190, 60, 50], [70, 120, 200]][seed % 3];
+        for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+            const k = (y * n + x) * 4, on = ((x >> 3) + (y >> 3)) % 2;
+            data[k] = on ? c1[0] : 60; data[k + 1] = on ? c1[1] : 60; data[k + 2] = on ? c1[2] : 60; data[k + 3] = 255;
+        }
+        return { n, data };
+    }
+
+    function loadTexture(src, seed) {
+        const tex = gl.createTexture();
+        const setup = () => {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.generateMipmap(gl.TEXTURE_2D);
+        };
+        const uploadGenerated = () => {
+            const f = fallbackPixels(seed);
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, f.n, f.n, 0, gl.RGBA, gl.UNSIGNED_BYTE, f.data);
+            setup();
+        };
+        const useFallback = () => {
+            uploadGenerated();
+            warning.style.display = "block";
+        };
+        uploadGenerated(); // temporary until the image finishes loading
+        const img = new Image();
+        img.onload = () => {
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            try {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                setup();
+            } catch (e) {
+                console.warn("Image blocked (" + src + "):", e);
+                useFallback();
+            }
+        };
+        img.onerror = useFallback;
+        img.src = src;
+        return tex;
+    }
+
+    const texFloor = loadTexture("assets/floor/Tiles143_1K-JPG_Color.jpg", 0);
+    const texApple = loadTexture("assets/apple/3DApple001_LQ-1K-JPG_Color.jpg", 1);
+    const texWatermelon = loadTexture("assets/watermelon/3DMelon001_LQ-1K-JPG_Color.jpg", 2);
+    const texGlass = loadTexture("assets/metal/Metal049A_1K-JPG_Color.jpg", 0);   // default glass texture
+
+    // ------------------------------------------------------------------
+    // Framebuffers (render-to-texture), as in the shadow map
+    // ------------------------------------------------------------------
+    function createRenderTarget(w, h) {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const depth = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+            console.error("Incomplete framebuffer");
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        return { fb, tex, depth };
+    }
+    function deleteRenderTarget(rt) {
+        if (!rt) return;
+        gl.deleteFramebuffer(rt.fb); gl.deleteTexture(rt.tex); gl.deleteRenderbuffer(rt.depth);
+    }
+
+    let reflectionRT = null, refractionRT = null;
+    function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.floor(window.innerWidth * dpr), h = Math.floor(window.innerHeight * dpr);
+        if (w === canvas.width && h === canvas.height && reflectionRT) return;
+        canvas.width = w; canvas.height = h;
+        deleteRenderTarget(reflectionRT); deleteRenderTarget(refractionRT);
+        reflectionRT = createRenderTarget(w, h);
+        refractionRT = createRenderTarget(w, h);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // ------------------------------------------------------------------
+    // Light (Phong: ambient, diffuse, specular)
+    // ------------------------------------------------------------------
+    const ambientLight = [0.3, 0.3, 0.3];
+    const lightIntensity = [1.0, 1.0, 0.95];
+    const lightPosition = [2.0, 7.0, 5.0];
+
+    // ------------------------------------------------------------------
+    // Flyby camera
+    // ------------------------------------------------------------------
+    const camera = { pos: [9.0, 2.0, 7.0], yaw: 0, pitch: 0 };
+    (function aimAt(target) {
+        const d = v3.norm(v3.sub(target, camera.pos));
+        camera.yaw = Math.atan2(d[0], -d[2]);
+        camera.pitch = Math.asin(d[1]);
+    })([0, 0.5, 0]);
+
+    function cameraForward() {
+        const cp = Math.cos(camera.pitch);
+        return [cp * Math.sin(camera.yaw), Math.sin(camera.pitch), -cp * Math.cos(camera.yaw)];
+    }
+    // same construction as lookAt (without MV.js's console.log, which would run every frame)
+    function viewMatrix(eye, f) {
+        const n = v3.norm(v3.cross(f, [0, 1, 0]));   // right
+        const u = v3.cross(n, f);                     // up
+        const b = v3.scale(f, -1);                    // back
+        return mat4(
+            n[0], n[1], n[2], -v3.dot(n, eye),
+            u[0], u[1], u[2], -v3.dot(u, eye),
+            b[0], b[1], b[2], -v3.dot(b, eye),
+            0, 0, 0, 1);
+    }
+
+    const keys = {};
+    window.addEventListener("keydown", (e) => {
+        keys[e.code] = true;
+        if (e.code === "KeyH") {
+            const p = document.getElementById("panel");
+            p.style.display = p.style.display === "none" ? "block" : "none";
+        }
+    });
+    window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+    window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+
+    let dragging = false, lastX = 0, lastY = 0;
+    canvas.addEventListener("mousedown", (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener("mouseup", () => { dragging = false; });
+    window.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        camera.yaw += (e.clientX - lastX) * 0.004;
+        camera.pitch -= (e.clientY - lastY) * 0.004;
+        lastX = e.clientX; lastY = e.clientY;
+    });
+
+    function updateCamera(dt) {
+        const speed = (keys.ShiftLeft || keys.ShiftRight ? 12 : 4) * dt;
+        const rot = 1.5 * dt;
+        if (keys.ArrowLeft) camera.yaw -= rot;
+        if (keys.ArrowRight) camera.yaw += rot;
+        if (keys.ArrowUp) camera.pitch += rot;
+        if (keys.ArrowDown) camera.pitch -= rot;
+        const lim = Math.PI / 2 - 0.01;
+        camera.pitch = Math.max(-lim, Math.min(lim, camera.pitch));
+
+        const f = cameraForward();
+        const r = v3.norm(v3.cross(f, [0, 1, 0]));
+        let move = [0, 0, 0];
+        if (keys.KeyW) move = v3.add(move, f);
+        if (keys.KeyS) move = v3.sub(move, f);
+        if (keys.KeyD) move = v3.add(move, r);
+        if (keys.KeyA) move = v3.sub(move, r);
+        if (keys.KeyE) move = v3.add(move, [0, 1, 0]);
+        if (keys.KeyQ) move = v3.sub(move, [0, 1, 0]);
+        camera.pos = v3.add(camera.pos, v3.scale(move, speed));
+    }
+
+    // ------------------------------------------------------------------
+    // User interface
+    // ------------------------------------------------------------------
+    const ui = {};
+    for (const [id, out, digits] of [["transparency", "vTransparency", 2], ["f0", "vF0", 2],
+                                      ["darkening", "vDarkening", 2], ["angle", "vAngle", 0]]) {
+        const el = document.getElementById(id), o = document.getElementById(out);
+        const update = () => { ui[id] = parseFloat(el.value); o.textContent = ui[id].toFixed(digits); };
+        el.addEventListener("input", update); update();
+    }
+    const viewModeEl = document.getElementById("viewMode");
+    const pauseEl = document.getElementById("pause");
+    // remove focus from controls after use, so W/S/arrows move the camera again
+    for (const el of document.querySelectorAll("#panel input, #panel select"))
+        el.addEventListener("change", () => el.blur());
+
+    // ------------------------------------------------------------------
+    // Scene: two rotating objects (one on each side of the glass) + static floor.
+    // The glass is the plane x = 0 (rotated by the "glass angle" slider).
+    // ------------------------------------------------------------------
+    let rotation = 0;
+    function sceneObjects() {
+        return [
+            // --- rotating objects (drawn first) ---
+            // apple on the +x side of the glass (the .obj is normalized: largest dimension = 1)
+            { mesh: meshes.apple, tex: texApple, texScale: [1, 1],
+              model: mult(translate(4.0, 0.09, 0.0), mult(rotateY(rotation), scale(2.2, 2.2, 2.2))) },
+            // watermelon on the -x side
+            { mesh: meshes.watermelon, tex: texWatermelon, texScale: [1, 1],
+              model: mult(translate(-4.0, 0.37, 0.5), mult(rotateY(-rotation * 0.8), scale(2.8, 2.8, 2.8))) },
+            // --- static object ---
+            { mesh: quad, tex: texFloor, texScale: [7, 7],
+              model: mult(translate(0, -1.0, 0), mult(rotateX(-90), scale(14, 14, 1))) }          // floor
+        ];
+    }
+
+    function glassModel() {
+        // XY square (normal +Z) rotated to lie on the plane x = 0 (normal +X)
+        return mult(translate(0, 1.5, 0), mult(rotateY(90 + ui.angle), scale(6.0, 2.5, 1.0)));
+    }
+
+    // Reflection matrix about the plane n.x + d = 0 (n unit length)
+    function reflectionMatrix(n, d) {
+        const [a, b, c] = n;
+        return mat4(
+            1 - 2 * a * a, -2 * a * b, -2 * a * c, -2 * a * d,
+            -2 * a * b, 1 - 2 * b * b, -2 * b * c, -2 * b * d,
+            -2 * a * c, -2 * b * c, 1 - 2 * c * c, -2 * c * d,
+            0, 0, 0, 1);
+    }
+
+    // Draws ALL objects (no "if" selection) with the given
+    // vpMatrix, camera position and clipping plane.
+    function drawScene(objects, vp, eye, clip) {
+        gl.useProgram(sceneProgram);
+        gl.uniformMatrix4fv(uS.vpMatrix, false, flatten(vp));
+        gl.uniform3fv(uS.camPos, eye);
+        gl.uniform4fv(uS.clipPlane, clip);
+        gl.uniform3fv(uS.lightPosition, lightPosition);
+        gl.uniform3fv(uS.lightIntensity, lightIntensity);
+        gl.uniform3fv(uS.ambientLight, ambientLight);
+        gl.uniform1f(uS.shininess, 32.0);
+        gl.uniform1f(uS.ks, 0.5);
+        gl.uniform1i(uS.textureMap, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        for (const o of objects) {
+            gl.bindTexture(gl.TEXTURE_2D, o.tex);
+            gl.uniformMatrix4fv(uS.mMatrix, false, flatten(o.model));
+            gl.uniformMatrix3fv(uS.nMatrix, false, flatten(normalMatrix(o.model, true)));
+            gl.uniform2fv(uS.texScale, o.texScale);
+            gl.bindVertexArray(o.mesh.vao);
+            gl.drawArrays(gl.TRIANGLES, 0, o.mesh.count);
+        }
+        gl.bindVertexArray(null);
+    }
+
+    // ------------------------------------------------------------------
+    // Render loop: 3 passes
+    // ------------------------------------------------------------------
+    let lastTime = performance.now();
+    function render(now) {
+        const dt = Math.min((now - lastTime) / 1000, 0.1);
+        lastTime = now;
+        resize();
+        updateCamera(dt);
+        if (!pauseEl.checked) rotation = (rotation + 40 * dt) % 360;
+
+        const W = canvas.width, H = canvas.height;
+        const objects = sceneObjects();
+        const eye = camera.pos;
+
+        const proj = perspective(60, W / H, 0.1, 100);
+        const view = viewMatrix(eye, cameraForward());
+        const vp = mult(proj, view);
+
+        // glass plane in world coordinates
+        const G = glassModel();
+        const p0 = transform(G, [0, 0, 0], 1);
+        const tangent = v3.norm(transform(G, [1, 0, 0], 0));
+        const binormal = v3.norm(transform(G, [0, 1, 0], 0));
+        const n = v3.norm(v3.cross(tangent, binormal));
+        const d = -v3.dot(n, p0);
+
+        // camera side: the clipping plane keeps what is on the same side as the camera
+        const side = (v3.dot(n, eye) + d) >= 0 ? 1 : -1;
+        const clipCameraSide = [side * n[0], side * n[1], side * n[2], side * d];
+        const clipOtherSide = [-clipCameraSide[0], -clipCameraSide[1], -clipCameraSide[2], -clipCameraSide[3]];
+        const noClip = [0, 0, 0, 1];  // 0x+0y+0z+1 > 0 always
+
+        const R = reflectionMatrix(n, d);
+        const eyeReflected = transform(R, eye, 1);
+
+        gl.viewport(0, 0, W, H);
+        gl.clearColor(0.55, 0.68, 0.82, 1.0);
+
+        // PASS 1: REFLECTION -> framebuffer
+        // mirrored camera (V * R); clipping removes everything behind the glass,
+        // otherwise objects on the other side would show up "inside" the reflection.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, reflectionRT.fb);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        drawScene(objects, mult(vp, R), eyeReflected, clipCameraSide);
+
+        // PASS 2: TRANSPARENCY -> framebuffer
+        // real camera; the (inverted) clipping keeps only what is behind the glass.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, refractionRT.fb);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        drawScene(objects, vp, eye, clipOtherSide);
+
+        // PASS 3: REAL CAMERA -> screen
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        drawScene(objects, vp, eye, noClip);
+
+        // glass: composes the textures from passes 1 and 2
+        gl.useProgram(glassProgram);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, reflectionRT.tex);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, refractionRT.tex);
+        gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texGlass);
+        gl.uniform1i(uG.reflectionMap, 1);
+        gl.uniform1i(uG.refractionMap, 2);
+        gl.uniform1i(uG.glassMap, 3);
+        gl.uniform2f(uG.texScale, 2.4, 1.0);   // 12 x 5 glass: keeps the texture's aspect ratio
+        gl.uniform2f(uG.resolution, W, H);
+        gl.uniformMatrix4fv(uG.mMatrix, false, flatten(G));
+        gl.uniformMatrix4fv(uG.vpMatrix, false, flatten(vp));
+        gl.uniform3fv(uG.planeNormal, n);
+        gl.uniform3fv(uG.camPos, eye);
+        gl.uniform3fv(uG.lightPosition, lightPosition);
+        gl.uniform3fv(uG.lightIntensity, lightIntensity);
+        gl.uniform3fv(uG.ambientLight, ambientLight);
+        gl.uniform1f(uG.transparency, ui.transparency);
+        gl.uniform1f(uG.F0, ui.f0);
+        const k = ui.darkening; // darkening: blends white with a dark bluish gray
+        gl.uniform3f(uG.tint, 1 - k * 0.85, 1 - k * 0.78, 1 - k * 0.7);
+        gl.uniform1i(uG.viewMode, parseInt(viewModeEl.value));
+        gl.bindVertexArray(quad.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, quad.count);
+        gl.bindVertexArray(null);
+
+        // unbind the framebuffer textures (avoids a "feedback loop" in the next frame)
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE0);
+
+        requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+</script>
+</body>
+</html>
