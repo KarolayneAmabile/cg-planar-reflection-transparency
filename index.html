@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Planar Reflection and Transparency via Multi-Pass Rendering - CG</title>
+<!-- Estilo da página: canvas ocupando a tela inteira e o painel de controles por cima. -->
 <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
     canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
@@ -23,9 +24,19 @@
 <body>
 
 <!-- =====================================================================
-     SHADER 1 (scene objects): Phong lighting (ambient + diffuse +
-     specular, no shadows) + texture + CLIPPING PLANE.
-     Used in all three passes: reflection, transparency and real camera.
+     SHADER 1: SHADER DA CENA (vértice + fragmento)
+
+     Desenha os objetos (maçã, melancia e chão) com iluminação de Phong
+     (ambiente + difusa + especular, sem sombras), textura e plano de
+     clipping. É usado nos três passos: reflexo, transparência e câmera real.
+
+     A estrutura segue os exemplos do professor (cubeshadow.html e
+     CubeTextured.html): shaders dentro de <script type="vertex"> e
+     <script type="fragment">, "#version 300 es", uniforms mMatrix e
+     vpMatrix e a iluminação de Phong do fragment shader.
+
+     Requisitos atendidos aqui: shaders próprios (1), textura em todos os
+     objetos (4) e plano de clipping (5).
      ===================================================================== -->
 <script type="vertex" id="vsScene">
     #version 300 es
@@ -33,16 +44,18 @@
     layout(location = 1) in vec3 normal;
     layout(location = 2) in vec2 texCoord;
 
-    uniform mat4 mMatrix;      // model (world) matrix
-    uniform mat3 nMatrix;      // normal matrix (inverse transpose of mMatrix)
-    uniform mat4 vpMatrix;     // projection * view (reflection pass: P * V * Reflection)
-    uniform vec2 texScale;     // texture tiling
+    uniform mat4 mMatrix;      // matriz de modelo (leva o objeto para o mundo)
+    uniform mat3 nMatrix;      // matriz das normais (inversa transposta de mMatrix)
+    uniform mat4 vpMatrix;     // projeção * visão (no passo do reflexo: P * V * R)
+    uniform vec2 texScale;     // quantas vezes a textura se repete
 
     out vec3 worldPos;
     out vec3 worldNormal;
     out vec2 fTexCoord;
 
     void main() {
+        // Mesmo esquema do cubeshadow.html: posição no mundo (rotPosition no
+        // exemplo) e depois a projeção com vpMatrix.
         vec4 wp = mMatrix * position;
         worldPos = wp.xyz;
         worldNormal = nMatrix * normal;
@@ -59,23 +72,28 @@
     in vec3 worldNormal;
     in vec2 fTexCoord;
 
-    uniform sampler2D textureMap;
-    uniform vec4 clipPlane;        // clipping plane (a,b,c,d) in world coordinates
+    uniform sampler2D textureMap;  // textura do objeto (requisito 4)
+    uniform vec4 clipPlane;        // plano de clipping (a,b,c,d) no mundo, muda a cada passo (requisito 5)
     uniform vec3 lightPosition;
     uniform vec3 lightIntensity;
     uniform vec3 ambientLight;
-    uniform vec3 camPos;           // camera position (real or reflected)
+    uniform vec3 camPos;           // posição da câmera (real ou refletida)
     uniform float shininess;
     uniform float ks;
 
     out vec4 fragColor;
 
     void main() {
-        // Clipping plane: everything on the negative side of the plane is discarded.
-        // No object selection: ALL objects are drawn in every pass; the plane
-        // decides (per fragment) what is visible, like glClipPlane.
+        // Plano de clipping (requisito 5): o que estiver do lado negativo do
+        // plano é descartado. Nenhum objeto é escolhido por "if": todos são
+        // desenhados em todos os passos, e é o plano que decide, pixel a pixel,
+        // o que aparece. É o equivalente ao glClipPlane do OpenGL antigo.
         if (dot(clipPlane, vec4(worldPos, 1.0)) < 0.0) discard;
 
+        // Iluminação de Phong, baseada nos fragment shaders do CubeTextured.html
+        // e do cubeshadow.html (ambiente + difusa + pow(especular, n)).
+        // Diferenças: aqui L aponta da superfície para a luz, e a especular é
+        // multiplicada por ks.
         vec3 N = normalize(worldNormal);
         vec3 L = normalize(lightPosition - worldPos);
         vec3 V = normalize(camPos - worldPos);
@@ -84,8 +102,9 @@
         float diff = max(dot(N, L), 0.0);
         float spec = step(0.0, dot(N, L)) * pow(max(dot(R, V), 0.0), shininess);
 
+        // cor da textura; regiões transparentes do PNG viram branco
         vec4 t = texture(textureMap, fTexCoord);
-        vec3 base = mix(vec3(1.0), t.rgb, t.a);   // transparent texels become white
+        vec3 base = mix(vec3(1.0), t.rgb, t.a);
 
         vec3 color = base * (ambientLight + lightIntensity * diff) + ks * lightIntensity * spec;
         fragColor = vec4(color, 1.0);
@@ -93,10 +112,19 @@
 </script>
 
 <!-- =====================================================================
-     SHADER 2 (glass): completely different. It does not light "objects":
-     it composes the textures produced by the previous passes (framebuffers)
-     using the view angle (Fresnel/Schlick), the transparency (uniform) and
-     the glass's own default texture.
+     SHADER 2: SHADER DO VIDRO (vértice + fragmento)
+
+     Totalmente diferente do shader da cena, como o professor indicou. Ele
+     não ilumina objetos: junta as texturas geradas nos passos anteriores
+     (framebuffers) usando o ângulo de visão (Fresnel/Schlick), a
+     transparência (uniform) e a textura do próprio vidro.
+
+     Código feito para este trabalho; só o formato geral do shader segue o
+     mesmo padrão dos exemplos do professor.
+
+     Requisitos atendidos aqui: reflexo e transparência pelo ângulo de
+     visão (1), uso das texturas dos framebuffers (2), transparência por
+     uniform (3) e textura no vidro (4).
      ===================================================================== -->
 <script type="vertex" id="vsGlass">
     #version 300 es
@@ -111,6 +139,7 @@
     out vec2 fTexCoord;
 
     void main() {
+        // mesma transformação do shader da cena
         vec4 wp = mMatrix * position;
         worldPos = wp.xyz;
         fTexCoord = texCoord * texScale;
@@ -125,56 +154,63 @@
     in vec3 worldPos;
     in vec2 fTexCoord;
 
-    uniform sampler2D reflectionMap;   // pass 1: reflected scene (mirrored camera + clipping)
-    uniform sampler2D refractionMap;   // pass 2: scene behind the glass (inverted clipping)
-    uniform sampler2D glassMap;        // default glass texture (metal)
+    // Texturas renderizadas a partir da cena nos framebuffers, sem cube map (requisito 2)
+    uniform sampler2D reflectionMap;   // passo 1: cena refletida (câmera espelhada + clipping)
+    uniform sampler2D refractionMap;   // passo 2: cena atrás do vidro (clipping invertido)
+    uniform sampler2D glassMap;        // textura do próprio vidro, o metal (requisito 4)
     uniform vec2 resolution;
 
-    uniform vec3 planeNormal;          // glass normal (world)
+    uniform vec3 planeNormal;          // normal do vidro no mundo
     uniform vec3 camPos;
     uniform vec3 lightPosition;
     uniform vec3 lightIntensity;
     uniform vec3 ambientLight;
 
-    uniform float transparency;        // 0 = opaque, 1 = fully transparent
-    uniform float F0;                  // reflectivity at normal incidence
-    uniform vec3 tint;                 // glass color/darkening
-    uniform int viewMode;              // 0 = final, 1 = reflection only, 2 = transparency only
+    uniform float transparency;        // transparência ajustável (requisito 3): 0 = opaco, 1 = transparente
+    uniform float F0;                  // refletividade olhando o vidro de frente
+    uniform vec3 tint;                 // cor/escurecimento do vidro
+    uniform int viewMode;              // 0 = final, 1 = só reflexo, 2 = só transparência
 
     out vec4 fragColor;
 
     void main() {
-        // screen coordinate -> coordinate in the framebuffer textures
+        // Converte a posição do pixel na tela em coordenada das texturas dos
+        // passos anteriores. É a mesma ideia do "shadowCoord" do cubeshadow.html;
+        // como aqui os passos anteriores usaram a mesma tela, basta
+        // gl_FragCoord / resolução.
         vec2 screenUV = gl_FragCoord.xy / resolution;
 
         vec3 V = normalize(camPos - worldPos);
-        // the glass is two-sided: the normal always faces the camera
+        // o vidro tem duas faces: a normal sempre aponta para o lado da câmera
         vec3 N = faceforward(normalize(planeNormal), -V, normalize(planeNormal));
 
-        // default glass texture
         vec3 g = texture(glassMap, fTexCoord).rgb;
 
-        // ---- view angle: Schlick's approximation of Fresnel ----
+        // Reflexo e transparência pelo ângulo de visão (requisito 1), com a
+        // aproximação de Schlick para Fresnel: olhando de frente predomina a
+        // transparência; olhando de lado (ângulo rasante), o reflexo.
         float cosTheta = clamp(dot(N, V), 0.0, 1.0);
         float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 
         vec3 reflected   = texture(reflectionMap, screenUV).rgb;
         vec3 transmitted = texture(refractionMap, screenUV).rgb * tint;
 
-        // glass body (lit default texture: ambient + diffuse)
+        // corpo do vidro: textura iluminada com ambiente + difusa
         vec3 L = normalize(lightPosition - worldPos);
         float diff = max(dot(N, L), 0.0);
         vec3 body = g * tint * (ambientLight + lightIntensity * diff);
 
-        // transparency controlled by the uniform
+        // a transparência (uniform) decide quanto se vê da cena atrás do vidro (requisito 3)
         vec3 surface = mix(body, transmitted, transparency);
-        // reflection grows at grazing angles (Fresnel); transmission decreases accordingly
+        // o reflexo entra com o peso de Fresnel; a transparência diminui na mesma proporção
         vec3 color = mix(surface, reflected, fresnel);
 
-        // specular highlight of the light on the glass
+        // brilho especular da luz no vidro (mesmo termo de Phong dos exemplos do professor)
         vec3 R = reflect(-L, N);
         color += lightIntensity * pow(max(dot(R, V), 0.0), 80.0) * 0.8;
 
+        // modos de depuração do painel ("Show on glass"): mostram a textura
+        // pura do passo 1 ou do passo 2
         if (viewMode == 1) color = reflected;
         if (viewMode == 2) color = texture(refractionMap, screenUV).rgb;
 
@@ -182,8 +218,12 @@
     }
 </script>
 
+<!-- Canvas onde o WebGL desenha, como nos exemplos do professor. -->
 <canvas id="webgl-canvas"></canvas>
 
+<!-- Painel de controles. O slider "Transparency" alimenta o uniform de
+     transparência (requisito 3), e o texto no fim explica a câmera flyby
+     (requisito 6). -->
 <div id="panel">
     <h3>Reflection and Transparency</h3>
     <label>Transparency (uniform) <span class="val" id="vTransparency"></span>
@@ -211,12 +251,17 @@
         e.g. <code>python3 -m http.server</code>). Using generated placeholders.</div>
 </div>
 
+<!-- Bibliotecas de apoio copiadas sem alteração da pasta Common/ do professor:
+     MV.js (vetores e matrizes: mult, translate, rotate, scale, perspective,
+     flatten, normalMatrix...) e initShaders.js (compila e liga os shaders). -->
 <script type="text/javascript" src="Common/MV.js"></script>
 <script type="text/javascript" src="Common/initShaders.js"></script>
 <script>
     // ------------------------------------------------------------------
-    // Context
+    // Contexto WebGL e programas de shader
     // ------------------------------------------------------------------
+    // Copiado do cubeshadow.html: pega o contexto "webgl2" (com aviso se não
+    // houver), liga o teste de profundidade e inverte o Y das imagens.
     const canvas = document.getElementById("webgl-canvas");
     const gl = canvas.getContext("webgl2");
     if (!gl) {
@@ -226,9 +271,13 @@
     gl.enable(gl.DEPTH_TEST);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
+    // Os dois programas de shader próprios (requisito 1), compilados com o
+    // initShaders do professor.
     const sceneProgram = initShaders(gl, "vsScene", "fsScene");
     const glassProgram = initShaders(gl, "vsGlass", "fsGlass");
 
+    // Busca de uma vez as posições dos uniforms de cada programa. Nos exemplos
+    // o professor chama gl.getUniformLocation direto; aqui ficou numa função.
     function locations(program, names) {
         const out = {};
         for (const n of names) out[n] = gl.getUniformLocation(program, n);
@@ -244,8 +293,10 @@
     const warning = document.getElementById("warning");
 
     // ------------------------------------------------------------------
-    // Small vector helpers (plain arrays)
+    // Funções de vetor
     // ------------------------------------------------------------------
+    // Contas simples com vetores de 3 posições (arrays comuns), usadas pela
+    // câmera e pelo plano do vidro.
     const v3 = {
         add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
         sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
@@ -254,7 +305,7 @@
         cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
         norm: (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; }
     };
-    // applies a mat4 (MV.js, m[row][column]) to (x,y,z,w)
+    // aplica uma mat4 do MV.js (m[linha][coluna]) ao ponto ou vetor (x,y,z,w)
     function transform(m, p, w) {
         const r = [0, 0, 0];
         for (let a = 0; a < 3; a++) r[a] = m[a][0] * p[0] + m[a][1] * p[1] + m[a][2] * p[2] + m[a][3] * w;
@@ -262,8 +313,12 @@
     }
 
     // ------------------------------------------------------------------
-    // Geometry (position, normal and texture coordinate)
+    // Geometria
     // ------------------------------------------------------------------
+    // Cria uma malha: um VAO com os buffers de posição, normal e coordenada de
+    // textura. A criação dos buffers é a mesma do cubeshadow.html (createBuffer,
+    // bufferData, vertexAttribPointer, enableVertexAttribArray); a diferença é
+    // que cada objeto ganha o seu VAO, para ser desenhado com um bindVertexArray.
     function createMesh(pos, nor, uv) {
         const vao = gl.createVertexArray();
         gl.bindVertexArray(vao);
@@ -281,6 +336,7 @@
         return { vao, count: pos.length / 3 };
     }
 
+    // Esfera usada no lugar das frutas enquanto os arquivos .obj carregam.
     function sphereMesh(slices, stacks) {
         const pos = [], nor = [], uv = [];
         const pt = (s, t) => {
@@ -297,7 +353,8 @@
         return createMesh(pos, nor, uv);
     }
 
-    // square on the XY plane, from -1 to 1, normal +Z
+    // Quadrado no plano XY (de -1 a 1, normal +Z), usado para o chão e para o
+    // vidro. São dois triângulos, como cada face do quad(a,b,c,d) dos exemplos.
     function quadMesh() {
         const pos = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0];
         const nor = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1];
@@ -309,17 +366,19 @@
     const quad = quadMesh();
 
     // ------------------------------------------------------------------
-    // OBJ parser (v, vt, vn, f). The model is centered at the origin and
-    // scaled so that its largest dimension equals 1 (the final size comes
-    // from the model matrix).
+    // Leitor de arquivos OBJ
     // ------------------------------------------------------------------
+    // Lê vértices (v), coordenadas de textura (vt), normais (vn) e faces (f).
+    // Os exemplos do professor não carregam modelos, então este leitor foi
+    // escrito para o trabalho. O modelo é centralizado na origem e escalado
+    // para que a maior dimensão valha 1; o tamanho final vem da matriz de modelo.
     function parseOBJ(text) {
         const P = [], T = [], N = [];
         const pos = [], nor = [], uv = [];
         const index = (s, arr) => {
-            if (!s) return -1;                      // empty field (e.g. "v//vn")
+            if (!s) return -1;                      // campo vazio (ex.: "v//vn")
             const k = parseInt(s);
-            return k < 0 ? arr.length + k : k - 1;  // OBJ is 1-based; negative = relative
+            return k < 0 ? arr.length + k : k - 1;  // OBJ começa em 1; negativo = relativo
         };
         for (const raw of text.split("\n")) {
             const s = raw.trim().split(/\s+/);
@@ -331,7 +390,7 @@
                     const [a, b, c] = t.split("/");
                     return [index(a, P), index(b, T), index(c, N)];
                 });
-                // polygons with more than 3 vertices become a triangle fan
+                // polígonos com mais de 3 vértices viram um leque de triângulos
                 for (let q = 1; q + 1 < vs.length; q++) {
                     const tri = [vs[0], vs[q], vs[q + 1]];
                     const faceN = v3.norm(v3.cross(v3.sub(P[tri[1][0]], P[tri[0][0]]),
@@ -355,10 +414,11 @@
         return createMesh(pos, nor, uv);
     }
 
-    // while the .obj is loading (or if it fails), a sphere is used instead
+    // Carrega os dois modelos da cena. Enquanto o .obj não chega (ou se falhar),
+    // a esfera aparece no lugar.
     const meshes = { apple: sphere, watermelon: sphere };
     function loadOBJ(name, url) {
-        fetch(url, { cache: "no-store" })   // always read the current version of the file
+        fetch(url, { cache: "no-store" })   // sempre lê a versão atual do arquivo, sem cache
             .then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); })
             .then((text) => { meshes[name] = parseOBJ(text); })
             .catch((e) => {
@@ -370,10 +430,11 @@
     loadOBJ("watermelon", "assets/watermelon/3DMelon001_LQ-1K-JPG.obj");
 
     // ------------------------------------------------------------------
-    // Textures
+    // Texturas (requisito 4)
     // ------------------------------------------------------------------
+    // Textura xadrez gerada no código, usada se o navegador bloquear as imagens
+    // (acontece quando a página é aberta por file://).
     function fallbackPixels(seed) {
-        // generated checkerboard, in case the browser blocks the images (file://)
         const n = 64, data = new Uint8Array(n * n * 4);
         const c1 = [[200, 200, 200], [190, 60, 50], [70, 120, 200]][seed % 3];
         for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
@@ -383,6 +444,11 @@
         return { n, data };
     }
 
+    // Carrega uma imagem como textura. A configuração vem do CubeTextured.html e
+    // do cubeshadow.html (createTexture, texImage2D com a imagem, texParameteri,
+    // generateMipmap, filtro trilinear LINEAR_MIPMAP_LINEAR). Diferenças: REPEAT
+    // no lugar de MIRRORED_REPEAT, espera a imagem carregar antes de enviar e usa
+    // a textura gerada se a imagem for bloqueada.
     function loadTexture(src, seed) {
         const tex = gl.createTexture();
         const setup = () => {
@@ -402,7 +468,7 @@
             uploadGenerated();
             warning.style.display = "block";
         };
-        uploadGenerated(); // temporary until the image finishes loading
+        uploadGenerated(); // provisória, até a imagem terminar de carregar
         const img = new Image();
         img.onload = () => {
             gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -419,14 +485,21 @@
         return tex;
     }
 
+    // Uma textura para cada objeto, inclusive para o vidro (requisito 4).
     const texFloor = loadTexture("assets/floor/Tiles143_1K-JPG_Color.jpg", 0);
     const texApple = loadTexture("assets/apple/3DApple001_LQ-1K-JPG_Color.jpg", 1);
     const texWatermelon = loadTexture("assets/watermelon/3DMelon001_LQ-1K-JPG_Color.jpg", 2);
-    const texGlass = loadTexture("assets/metal/Metal049A_1K-JPG_Color.jpg", 0);   // default glass texture
+    const texGlass = loadTexture("assets/metal/Metal049A_1K-JPG_Color.jpg", 0);
 
     // ------------------------------------------------------------------
-    // Framebuffers (render-to-texture), as in the shadow map
+    // Framebuffers (requisito 2)
     // ------------------------------------------------------------------
+    // Cria um framebuffer que desenha numa textura (render-to-texture). O reflexo
+    // e a transparência são renderizados em framebuffers assim. É praticamente o
+    // framebuffer do shadow map do cubeshadow.html: uma textura como
+    // COLOR_ATTACHMENT0 e um renderbuffer de profundidade como DEPTH_ATTACHMENT.
+    // Diferenças: profundidade de 24 bits (lá era 16), verificação de que o
+    // framebuffer ficou completo e recriação quando a janela muda de tamanho.
     function createRenderTarget(w, h) {
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -455,6 +528,8 @@
         gl.deleteFramebuffer(rt.fb); gl.deleteTexture(rt.tex); gl.deleteRenderbuffer(rt.depth);
     }
 
+    // Dois framebuffers: um para o reflexo (passo 1) e outro para a
+    // transparência (passo 2), do mesmo tamanho da tela.
     let reflectionRT = null, refractionRT = null;
     function resize() {
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -469,15 +544,21 @@
     resize();
 
     // ------------------------------------------------------------------
-    // Light (Phong: ambient, diffuse, specular)
+    // Luz
     // ------------------------------------------------------------------
+    // Mesmo tipo de luz do cubeshadow.html: luz ambiente de 0.3 e uma luz
+    // pontual com posição e intensidade.
     const ambientLight = [0.3, 0.3, 0.3];
     const lightIntensity = [1.0, 1.0, 0.95];
     const lightPosition = [2.0, 7.0, 5.0];
 
     // ------------------------------------------------------------------
-    // Flyby camera
+    // Câmera flyby (requisito 6)
     // ------------------------------------------------------------------
+    // Câmera em primeira pessoa com dois ângulos (yaw para os lados, pitch para
+    // cima e para baixo) e movimento com WASD. É o jeito usual de fazer esse
+    // tipo de câmera; o enunciado permite copiar da internet, mas esta foi
+    // escrita para o trabalho.
     const camera = { pos: [9.0, 2.0, 7.0], yaw: 0, pitch: 0 };
     (function aimAt(target) {
         const d = v3.norm(v3.sub(target, camera.pos));
@@ -489,11 +570,13 @@
         const cp = Math.cos(camera.pitch);
         return [cp * Math.sin(camera.yaw), Math.sin(camera.pitch), -cp * Math.cos(camera.yaw)];
     }
-    // same construction as lookAt (without MV.js's console.log, which would run every frame)
+    // Matriz de visão. A conta é a mesma do lookAt() do MV.js (conferi que dá a
+    // mesma matriz); só não uso o lookAt porque ele tem um console.log que
+    // rodaria a cada quadro.
     function viewMatrix(eye, f) {
-        const n = v3.norm(v3.cross(f, [0, 1, 0]));   // right
-        const u = v3.cross(n, f);                     // up
-        const b = v3.scale(f, -1);                    // back
+        const n = v3.norm(v3.cross(f, [0, 1, 0]));   // direita
+        const u = v3.cross(n, f);                     // cima
+        const b = v3.scale(f, -1);                    // trás
         return mat4(
             n[0], n[1], n[2], -v3.dot(n, eye),
             u[0], u[1], u[2], -v3.dot(u, eye),
@@ -501,6 +584,7 @@
             0, 0, 0, 1);
     }
 
+    // Teclado e mouse da câmera. A tecla H mostra/esconde o painel.
     const keys = {};
     window.addEventListener("keydown", (e) => {
         keys[e.code] = true;
@@ -522,6 +606,7 @@
         lastX = e.clientX; lastY = e.clientY;
     });
 
+    // Move e gira a câmera a cada quadro, conforme as teclas pressionadas.
     function updateCamera(dt) {
         const speed = (keys.ShiftLeft || keys.ShiftRight ? 12 : 4) * dt;
         const rot = 1.5 * dt;
@@ -545,8 +630,10 @@
     }
 
     // ------------------------------------------------------------------
-    // User interface
+    // Painel de controles
     // ------------------------------------------------------------------
+    // Lê os sliders do painel para o objeto "ui". O valor de ui.transparency é
+    // enviado ao uniform de transparência no render() (requisito 3).
     const ui = {};
     for (const [id, out, digits] of [["transparency", "vTransparency", 2], ["f0", "vF0", 2],
                                       ["darkening", "vDarkening", 2], ["angle", "vAngle", 0]]) {
@@ -556,36 +643,39 @@
     }
     const viewModeEl = document.getElementById("viewMode");
     const pauseEl = document.getElementById("pause");
-    // remove focus from controls after use, so W/S/arrows move the camera again
+    // tira o foco dos controles depois do uso, para W/S/setas voltarem a mover a câmera
     for (const el of document.querySelectorAll("#panel input, #panel select"))
         el.addEventListener("change", () => el.blur());
 
     // ------------------------------------------------------------------
-    // Scene: two rotating objects (one on each side of the glass) + static floor.
-    // The glass is the plane x = 0 (rotated by the "glass angle" slider).
+    // Cena
     // ------------------------------------------------------------------
+    // O vidro divide a cena: a maçã fica de um lado e a melancia do outro, como
+    // pede a entrega do trabalho. Seguindo a dica do professor, os objetos que
+    // giram são desenhados primeiro e o objeto estático (chão) depois.
     let rotation = 0;
     function sceneObjects() {
         return [
-            // --- rotating objects (drawn first) ---
-            // apple on the +x side of the glass (the .obj is normalized: largest dimension = 1)
+            // maçã, do lado +x do vidro (o .obj é normalizado: maior dimensão = 1)
             { mesh: meshes.apple, tex: texApple, texScale: [1, 1],
               model: mult(translate(4.0, 0.09, 0.0), mult(rotateY(rotation), scale(2.2, 2.2, 2.2))) },
-            // watermelon on the -x side
+            // melancia, do lado -x
             { mesh: meshes.watermelon, tex: texWatermelon, texScale: [1, 1],
               model: mult(translate(-4.0, 0.37, 0.5), mult(rotateY(-rotation * 0.8), scale(2.8, 2.8, 2.8))) },
-            // --- static object ---
+            // chão (estático)
             { mesh: quad, tex: texFloor, texScale: [7, 7],
-              model: mult(translate(0, -1.0, 0), mult(rotateX(-90), scale(14, 14, 1))) }          // floor
+              model: mult(translate(0, -1.0, 0), mult(rotateX(-90), scale(14, 14, 1))) }
         ];
     }
 
+    // O plano de vidro: o quadrado XY (normal +Z) girado para ficar no plano
+    // x = 0 (normal +X). O slider "Glass angle" gira o vidro em torno de Y.
     function glassModel() {
-        // XY square (normal +Z) rotated to lie on the plane x = 0 (normal +X)
         return mult(translate(0, 1.5, 0), mult(rotateY(90 + ui.angle), scale(6.0, 2.5, 1.0)));
     }
 
-    // Reflection matrix about the plane n.x + d = 0 (n unit length)
+    // Matriz de reflexão em relação ao plano n.x + d = 0 (n unitário). Espelha a
+    // câmera do outro lado do vidro no passo do reflexo (requisito 2).
     function reflectionMatrix(n, d) {
         const [a, b, c] = n;
         return mat4(
@@ -595,8 +685,11 @@
             0, 0, 0, 1);
     }
 
-    // Draws ALL objects (no "if" selection) with the given
-    // vpMatrix, camera position and clipping plane.
+    // Desenha a cena inteira com o shader da cena. TODOS os objetos são
+    // desenhados em todos os passos; de um passo para o outro só mudam a
+    // câmera e o plano de clipping (requisito 5: nada de "if" escolhendo
+    // objetos). O envio de uniforms e o drawArrays seguem o estilo do
+    // cubeshadow.html (uniformMatrix4fv com flatten).
     function drawScene(objects, vp, eye, clip) {
         gl.useProgram(sceneProgram);
         gl.uniformMatrix4fv(uS.vpMatrix, false, flatten(vp));
@@ -621,8 +714,12 @@
     }
 
     // ------------------------------------------------------------------
-    // Render loop: 3 passes
+    // Laço de renderização: 3 passos por quadro (requisito 2)
     // ------------------------------------------------------------------
+    // Mesma estrutura do render() do cubeshadow.html: liga o framebuffer, limpa,
+    // desenha, desliga o framebuffer, desenha a imagem final usando a textura
+    // gerada e chama requestAnimationFrame. Lá era um passo extra (o shadow map);
+    // aqui são dois (reflexo e transparência).
     let lastTime = performance.now();
     function render(now) {
         const dt = Math.min((now - lastTime) / 1000, 0.1);
@@ -639,7 +736,8 @@
         const view = viewMatrix(eye, cameraForward());
         const vp = mult(proj, view);
 
-        // glass plane in world coordinates
+        // Equação do plano do vidro no mundo (n.x + d = 0). Ela é usada pelos
+        // planos de clipping e pela matriz de reflexão.
         const G = glassModel();
         const p0 = transform(G, [0, 0, 0], 1);
         const tangent = v3.norm(transform(G, [1, 0, 0], 0));
@@ -647,11 +745,13 @@
         const n = v3.norm(v3.cross(tangent, binormal));
         const d = -v3.dot(n, p0);
 
-        // camera side: the clipping plane keeps what is on the same side as the camera
+        // Planos de clipping de cada passo (requisito 5). O lado é escolhido pela
+        // posição da câmera, nunca por objeto, por isso a câmera pode atravessar
+        // o vidro e tudo continua funcionando.
         const side = (v3.dot(n, eye) + d) >= 0 ? 1 : -1;
-        const clipCameraSide = [side * n[0], side * n[1], side * n[2], side * d];
-        const clipOtherSide = [-clipCameraSide[0], -clipCameraSide[1], -clipCameraSide[2], -clipCameraSide[3]];
-        const noClip = [0, 0, 0, 1];  // 0x+0y+0z+1 > 0 always
+        const clipCameraSide = [side * n[0], side * n[1], side * n[2], side * d];   // mantém o lado da câmera
+        const clipOtherSide = [-clipCameraSide[0], -clipCameraSide[1], -clipCameraSide[2], -clipCameraSide[3]];   // mantém o lado de trás
+        const noClip = [0, 0, 0, 1];  // 0x+0y+0z+1 > 0 sempre: nada é cortado
 
         const R = reflectionMatrix(n, d);
         const eyeReflected = transform(R, eye, 1);
@@ -659,25 +759,29 @@
         gl.viewport(0, 0, W, H);
         gl.clearColor(0.55, 0.68, 0.82, 1.0);
 
-        // PASS 1: REFLECTION -> framebuffer
-        // mirrored camera (V * R); clipping removes everything behind the glass,
-        // otherwise objects on the other side would show up "inside" the reflection.
+        // PASSO 1: REFLEXO, desenhado no framebuffer reflectionRT.
+        // Câmera espelhada (V * R). O plano de clipping corta tudo o que está
+        // atrás do vidro; sem ele, os objetos do outro lado apareceriam "dentro"
+        // do reflexo.
         gl.bindFramebuffer(gl.FRAMEBUFFER, reflectionRT.fb);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         drawScene(objects, mult(vp, R), eyeReflected, clipCameraSide);
 
-        // PASS 2: TRANSPARENCY -> framebuffer
-        // real camera; the (inverted) clipping keeps only what is behind the glass.
+        // PASSO 2: TRANSPARÊNCIA, desenhada no framebuffer refractionRT.
+        // Câmera real. O plano de clipping invertido mantém só o que está atrás
+        // do vidro.
         gl.bindFramebuffer(gl.FRAMEBUFFER, refractionRT.fb);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         drawScene(objects, vp, eye, clipOtherSide);
 
-        // PASS 3: REAL CAMERA -> screen
+        // PASSO 3: CÂMERA REAL, desenhada na tela, sem corte.
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         drawScene(objects, vp, eye, noClip);
 
-        // glass: composes the textures from passes 1 and 2
+        // Por último o vidro, com o shader do vidro, que recebe as texturas dos
+        // passos 1 e 2. O uso de activeTexture + bindTexture + uniform1i para cada
+        // unidade de textura é igual ao do cubeshadow.html.
         gl.useProgram(glassProgram);
         gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, reflectionRT.tex);
         gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, refractionRT.tex);
@@ -685,7 +789,7 @@
         gl.uniform1i(uG.reflectionMap, 1);
         gl.uniform1i(uG.refractionMap, 2);
         gl.uniform1i(uG.glassMap, 3);
-        gl.uniform2f(uG.texScale, 2.4, 1.0);   // 12 x 5 glass: keeps the texture's aspect ratio
+        gl.uniform2f(uG.texScale, 2.4, 1.0);   // vidro de 12 x 5: mantém a proporção da textura
         gl.uniform2f(uG.resolution, W, H);
         gl.uniformMatrix4fv(uG.mMatrix, false, flatten(G));
         gl.uniformMatrix4fv(uG.vpMatrix, false, flatten(vp));
@@ -694,16 +798,17 @@
         gl.uniform3fv(uG.lightPosition, lightPosition);
         gl.uniform3fv(uG.lightIntensity, lightIntensity);
         gl.uniform3fv(uG.ambientLight, ambientLight);
-        gl.uniform1f(uG.transparency, ui.transparency);
+        gl.uniform1f(uG.transparency, ui.transparency);   // uniform de transparência, vindo do slider (requisito 3)
         gl.uniform1f(uG.F0, ui.f0);
-        const k = ui.darkening; // darkening: blends white with a dark bluish gray
+        const k = ui.darkening; // escurecimento: mistura branco com um cinza-azulado escuro
         gl.uniform3f(uG.tint, 1 - k * 0.85, 1 - k * 0.78, 1 - k * 0.7);
         gl.uniform1i(uG.viewMode, parseInt(viewModeEl.value));
         gl.bindVertexArray(quad.vao);
         gl.drawArrays(gl.TRIANGLES, 0, quad.count);
         gl.bindVertexArray(null);
 
-        // unbind the framebuffer textures (avoids a "feedback loop" in the next frame)
+        // Desliga as texturas dos framebuffers, para não ler e escrever a mesma
+        // textura no próximo quadro (o WebGL chama isso de "feedback loop").
         gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE0);
